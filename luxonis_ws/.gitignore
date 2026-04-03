@@ -1,9 +1,5 @@
-build/
-install/
-log/
-venv/
+src/.vscode/
 __pycache__/
 *.pyc
 *.egg-info/
 .eggs/
-.vscode/
