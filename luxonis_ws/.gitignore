@@ -1,0 +1,9 @@
+build/
+install/
+log/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+.vscode/

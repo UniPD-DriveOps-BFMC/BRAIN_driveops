@@ -1,0 +1,5 @@
+luxonis_ws/src/.vscode/
+**/__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
