@@ -1,0 +1,3 @@
+[submodule "luxonis_ws/src/traffic_sign/depthai-ros"]
+	path = luxonis_ws/src/traffic_sign/depthai-ros
+	url = https://github.com/luxonis/depthai-ros.git
