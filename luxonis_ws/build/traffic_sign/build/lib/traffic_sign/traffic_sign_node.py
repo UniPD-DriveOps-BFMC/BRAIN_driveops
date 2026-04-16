@@ -230,55 +230,39 @@ class TrafficSignNode(Node):
         except Exception as e:
             self.get_logger().warn(f'imgmsg_to_cv2 error: {e}')
 
-    # ── OAK-D Pro pipeline ────────────────────────────────────────────────────
+    # ── OAK-D Pro pipeline (DepthAI v3 API) ─────────────────────────────────
     def _build_oak_pipeline(self):
         import depthai as dai
 
         pipeline = dai.Pipeline()
 
-        cam = pipeline.create(dai.node.ColorCamera)
-        cam.setPreviewSize(self.imgsz, self.imgsz)
-        cam.setResolution(
-            dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-        cam.setInterleaved(False)
-        cam.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-        cam.setFps(20)
+        # RGB camera
+        cam     = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+        cam_out = cam.requestOutput(
+            (self.imgsz, self.imgsz), dai.ImgFrame.Type.BGR888p)
 
-        mono_l = pipeline.create(dai.node.MonoCamera)
-        mono_l.setResolution(
-            dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_l.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-
-        mono_r = pipeline.create(dai.node.MonoCamera)
-        mono_r.setResolution(
-            dai.MonoCameraProperties.SensorResolution.THE_400_P)
-        mono_r.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-
-        stereo = pipeline.create(dai.node.StereoDepth)
-        stereo.setDefaultProfilePreset(
-            dai.node.StereoDepth.PresetType.HIGH_DENSITY)
-        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-        stereo.setOutputSize(self.imgsz, self.imgsz)
+        # Stereo depth
+        stereo  = pipeline.create(dai.node.StereoDepth)
         stereo.setLeftRightCheck(True)
         stereo.setSubpixel(True)
-        mono_l.out.link(stereo.left)
-        mono_r.out.link(stereo.right)
+        stereo.setDefaultProfilePreset(
+            dai.node.StereoDepth.PresetMode.FAST_DENSITY)
 
-        xout_rgb = pipeline.create(dai.node.XLinkOut)
-        xout_rgb.setStreamName('rgb')
-        cam.preview.link(xout_rgb.input)
+        mono_l  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        mono_r  = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        mono_l.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8).link(stereo.left)
+        mono_r.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8).link(stereo.right)
 
-        xout_disp = pipeline.create(dai.node.XLinkOut)
-        xout_disp.setStreamName('disp')
-        stereo.disparity.link(xout_disp.input)
+        # Output queues — v3: createOutputQueue on the output, then pipeline.start(device)
+        q_rgb  = cam_out.createOutputQueue(maxSize=2, blocking=False)
+        q_disp = stereo.disparity.createOutputQueue(maxSize=2, blocking=False)
 
-        device   = dai.Device(pipeline)
-        q_rgb    = device.getOutputQueue('rgb',  maxSize=2, blocking=False)
-        q_disp   = device.getOutputQueue('disp', maxSize=2, blocking=False)
+        # v3: Device created without pipeline, then pipeline.start(device)
+        device   = dai.Device()
+        pipeline.start(device)
         max_disp = stereo.initialConfig.getMaxDisparity()
 
         return device, q_rgb, q_disp, max_disp
-
     # ── Preprocess ────────────────────────────────────────────────────────────
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
         img  = cv2.resize(frame, (self.imgsz, self.imgsz))
@@ -327,6 +311,7 @@ class TrafficSignNode(Node):
                     'x2':   int(np.clip(x2[idx[ki]], 0, orig_w)),
                     'y2':   int(np.clip(y2[idx[ki]], 0, orig_h)),
                 })
+                
         return detections
 
     # ── Distance (OAK mode only) ───────────────────────────────────────────────
@@ -354,7 +339,7 @@ class TrafficSignNode(Node):
     def _publish_detection(self, class_name, dist_m, conf):
         payload  = json.dumps({
             'sign':       class_name,
-            #'distance_m': round(dist_m, 3) if dist_m > 0 else None,
+            'distance_m': round(dist_m, 3) if dist_m > 0 else None,
             'confidence': round(conf, 3),
         })
         msg      = String()
@@ -375,10 +360,13 @@ class TrafficSignNode(Node):
                 ret, frame = self._cap.read()
             frame = frame if ret else None
         else:
+            # DepthAI v3: queue.get() returns frame directly
             in_rgb  = self._q_rgb.tryGet()
             in_disp = self._q_disp.tryGet()
-            frame   = in_rgb.getCvFrame()  if in_rgb  else None
-            disp    = in_disp.getFrame()   if in_disp else None
+            if in_rgb is not None:
+                frame = in_rgb.getCvFrame()
+            if in_disp is not None:
+                disp = in_disp.getFrame()
 
         if frame is None:
             return

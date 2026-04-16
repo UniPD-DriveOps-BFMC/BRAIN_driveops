@@ -68,21 +68,21 @@ spawn         "$MODELS/roundabout_sign/model.sdf"    "test_roundabout"
 sleep $WAIT
 remove        "test_roundabout"
 
-#spawn         "$MODELS/parking_sign/model.sdf"       "test_parking"
-#sleep $WAIT
-#remove        "test_parking"
+spawn         "$MODELS/parking_sign/model.sdf"       "test_parking"
+sleep $WAIT
+remove        "test_parking"
 
-#spawn         "$MODELS/oneway_sign/model.sdf"        "test_oneway"
-#sleep $WAIT
-#remove        "test_oneway"
+spawn         "$MODELS/oneway_sign/model.sdf"        "test_oneway"
+sleep $WAIT
+remove        "test_oneway"
 
 spawn_flipped "$MODELS/enter_highway_sign/model.sdf" "test_enter_hway"
 sleep $WAIT
 remove        "test_enter_hway"
 
-#spawn_flipped "$MODELS/leave_highway_sign/model.sdf" "test_leave_hway"
-#sleep $WAIT
-#remove        "test_leave_hway"
+spawn_flipped "$MODELS/leave_highway_sign/model.sdf" "test_leave_hway"
+sleep $WAIT
+remove        "test_leave_hway"
 
 spawn         "$MODELS/prohibited_sign/model.sdf"    "test_no_entry"
 sleep $WAIT

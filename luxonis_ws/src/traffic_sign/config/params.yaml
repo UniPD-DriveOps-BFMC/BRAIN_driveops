@@ -5,7 +5,7 @@ traffic_sign_node:
     detection_topic:  /traffic_sign/detection
     image_topic:      /traffic_sign/image
 
-    conf_threshold:   0.30
+    conf_threshold:   0.35
     iou_threshold:    0.40
     imgsz:            640
 
@@ -14,7 +14,7 @@ traffic_sign_node:
 
     # Simulator mode: subscribe to ROS2 image topic instead of OAK or webcam
     use_mock_camera:  false
-    use_sim:          true
+    use_sim:          false
     sim_image_topic:  /oak/rgb/image_raw
 
     trigger_dist_stop:             0.60
