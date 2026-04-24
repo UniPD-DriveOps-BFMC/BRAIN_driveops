@@ -17,7 +17,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 _PACKAGE_DIR   = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_MODEL = os.path.join(_PACKAGE_DIR, 'best.onnx')
+_DEFAULT_MODEL = os.path.join(_PACKAGE_DIR, 'best2.onnx')
 
 CLASS_NAMES = [
     'stop', 'parking', 'priority', 'roundabout',
