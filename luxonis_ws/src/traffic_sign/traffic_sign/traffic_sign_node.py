@@ -22,7 +22,9 @@ _DEFAULT_MODEL = os.path.join(_PACKAGE_DIR, 'best2.onnx')
 CLASS_NAMES = [
     'stop', 'parking', 'priority', 'roundabout',
     'one_way', 'no_entry', 'exit_highway',
-    'entrance_highway', 'crosswalk',
+    'entrance_highway', 'crosswalk',"pedestrian",
+    "car", "trafficlight", "stopline",
+    "roadblock",
 ]
 
 CLASS_COLORS_BGR = [
@@ -35,7 +37,13 @@ CLASS_COLORS_BGR = [
     (200,  80,   0),  # exit_highway
     (200, 130,   0),  # entrance_highway
     (50,  200,  50),  # crosswalk
+    (200,  100,   0),  # pedestrian
+    (50, 130,   0),  # car
+    (90, 100,  50),  # trafficlight
+    (50,  80,  80),  # stopline
+    (140,  80,  200),  # roadblock
 ]
+
 
 _DEFAULT_TRIGGER_DIST = {
     'stop':             0.60,
@@ -47,6 +55,11 @@ _DEFAULT_TRIGGER_DIST = {
     'exit_highway':     0.60,
     'entrance_highway': 0.80,
     'crosswalk':        0.50,
+    'pedestrian':          0.70,
+    'car':         0.80,
+    'trafficlight':     0.60,
+    'stopline': 0.80,
+    'roadblock':        0.50,
 }
 
 _DEFAULT_COOLDOWN = {
@@ -59,6 +72,11 @@ _DEFAULT_COOLDOWN = {
     'exit_highway':     8.0,
     'entrance_highway': 8.0,
     'crosswalk':        3.0,
+    'pedestrian':       4.0,
+    'car':              4.0,
+    'trafficlight':     4.0,
+    'stopline':         4.0,
+    'roadblock':        4.0,
 }
 
 # Supported ROS2 Image encodings → NumPy dtype + OpenCV conversion
