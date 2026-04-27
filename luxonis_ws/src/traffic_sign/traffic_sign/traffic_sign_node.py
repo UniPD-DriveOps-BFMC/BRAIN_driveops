@@ -2,6 +2,7 @@
 traffic_sign_node.py — BFMC Traffic Sign Detection
 No cv_bridge dependency — uses raw NumPy conversion for ROS2 Image messages.
 Three modes: SIM (ROS2 topic) | MOCK (webcam/video) | OAK-D Pro (depthai)
+
 """
 
 import os
@@ -17,26 +18,47 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 _PACKAGE_DIR   = os.path.dirname(os.path.abspath(__file__))
-_DEFAULT_MODEL = os.path.join(_PACKAGE_DIR, 'best.onnx')
+_DEFAULT_MODEL = os.path.join(_PACKAGE_DIR, 'best2.onnx')
 
 CLASS_NAMES = [
-    'stop', 'parking', 'priority', 'roundabout',
-    'one_way', 'no_entry', 'exit_highway',
-    'entrance_highway', 'crosswalk',
+    'stop',              # 0
+    'parking',           # 1
+    'priority',          # 2
+    'roundabout',        # 3
+    'one_way',           # 4
+    'no_entry',          # 5
+    'exit_highway',      # 6
+    'entrance_highway',  # 7
+    'crosswalk',         # 8
+    'pedestrian',        # 9
+    'car',               # 10
+    'trafficlight',      # 11
+    'stopline',          # 12
+    'roadblock',         # 13
 ]
 
+# BGR colors (note: OpenCV uses BGR, not RGB).
 CLASS_COLORS_BGR = [
-    (0,   0,   220),  # stop
-    (0,   165, 255),  # parking
-    (0,   200,   0),  # priority
-    (200,   0, 200),  # roundabout
-    (0,   200, 200),  # one_way
-    (0,     0, 160),  # no_entry
-    (200,  80,   0),  # exit_highway
-    (200, 130,   0),  # entrance_highway
-    (50,  200,  50),  # crosswalk
+    (50,   50, 220),   # stop              — red
+    (0,   150, 220),   # parking           — orange
+    (0,   180,   0),   # priority          — green
+    (180,   0, 180),   # roundabout        — magenta
+    (190, 190,   0),   # one_way           — cyan
+    (30,   30, 150),   # no_entry          — dark red
+    (0,    90, 160),   # exit_highway      — brown/orange
+    (220, 120,   0),   # entrance_highway  — blue
+    (50,  200,  50),   # crosswalk         — light green
+    (90,   90,  90),   # pedestrian        — gray
+    (90,  185,  90),   # car               — light green-gray
+    (90,   90, 200),   # trafficlight      — soft red-pink
+    (200,  90,  90),   # stopline          — soft blue
+    (90,  200,  90),   # roadblock         — light green
 ]
 
+# Trigger distance per class (meters). When the closest detection is within
+# this distance, the node emits a TRIGGER message on /traffic_sign/detection.
+# New dynamic-obstacle classes use shorter distances so the controller reacts
+# only when they are actually in the path.
 _DEFAULT_TRIGGER_DIST = {
     'stop':             0.60,
     'parking':          0.80,
@@ -47,8 +69,16 @@ _DEFAULT_TRIGGER_DIST = {
     'exit_highway':     0.60,
     'entrance_highway': 0.80,
     'crosswalk':        0.50,
+    'pedestrian':       1.50,   # react early to people
+    'car':              1.50,   # react early to other vehicles
+    'trafficlight':     2.00,   # need to read the light from far away
+    'stopline':         0.40,   # only relevant when very close
+    'roadblock':        1.00,   # static obstacle, medium range
 }
 
+# Cooldown per class (seconds) — minimum time between two TRIGGER events
+# for the same class. Dynamic obstacles get a short cooldown so the
+# controller is updated continuously while the obstacle is in view.
 _DEFAULT_COOLDOWN = {
     'stop':             5.0,
     'parking':          8.0,
@@ -59,6 +89,11 @@ _DEFAULT_COOLDOWN = {
     'exit_highway':     8.0,
     'entrance_highway': 8.0,
     'crosswalk':        3.0,
+    'pedestrian':       1.0,    # update often while visible
+    'car':              1.0,    # update often while visible
+    'trafficlight':     2.0,    # state can change (red→green)
+    'stopline':         3.0,
+    'roadblock':        3.0,
 }
 
 # Supported ROS2 Image encodings → NumPy dtype + OpenCV conversion
@@ -176,6 +211,27 @@ class TrafficSignNode(Node):
             f'ONNX loaded: {os.path.basename(model_path)}'
         )
 
+        # Sanity-check: warn loudly if the model output channels don't match
+        # the expected 14 classes. YOLOv8 output shape is [1, 4 + nc, N].
+        try:
+            out_shape = self.session.get_outputs()[0].shape
+            # out_shape may contain strings ("1","84","8400") or ints
+            nc_axis = out_shape[1]
+            if isinstance(nc_axis, int):
+                expected = 4 + len(CLASS_NAMES)
+                if nc_axis != expected:
+                    self.get_logger().warn(
+                        f'Model output has {nc_axis} channels, but '
+                        f'CLASS_NAMES has {len(CLASS_NAMES)} entries '
+                        f'(expected {expected}). Class IDs may be misaligned!'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'Model OK: {len(CLASS_NAMES)} classes detected'
+                    )
+        except Exception:
+            pass
+
         # ── Publishers (no cv_bridge — use raw imgmsg) ────────────────────────
         self.det_pub = self.create_publisher(String, detection_topic, 10)
         self.img_pub = self.create_publisher(Image,  image_topic,     10)
@@ -214,7 +270,8 @@ class TrafficSignNode(Node):
             f'  model     → {model_path}\n'
             f'  detection → {detection_topic}\n'
             f'  image out → {image_topic}\n'
-            f'  debug     → {self.debug_view}'
+            f'  debug     → {self.debug_view}\n'
+            f'  classes   → {len(CLASS_NAMES)}'
         )
         for cls in CLASS_NAMES:
             self.get_logger().info(
@@ -347,6 +404,12 @@ class TrafficSignNode(Node):
         self.det_pub.publish(msg)
         self.get_logger().info(f'TRIGGER → {payload}')
 
+    # ── Helper: safe class-name lookup ────────────────────────────────────────
+    @staticmethod
+    def _cls_name(cls_id: int) -> str:
+        return CLASS_NAMES[cls_id] if 0 <= cls_id < len(CLASS_NAMES) \
+               else f'cls_{cls_id}'
+
     # ── 20 Hz callback ────────────────────────────────────────────────────────
     def _cb(self) -> None:
         disp = None
@@ -396,8 +459,7 @@ class TrafficSignNode(Node):
 
         for i, det in enumerate(dets):
             cls_id     = det['cls']
-            class_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) \
-                         else f'cls_{cls_id}'
+            class_name = self._cls_name(cls_id)
             color      = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
             x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
 
@@ -421,8 +483,7 @@ class TrafficSignNode(Node):
         if dets:
             det        = dets[0]
             cls_id     = det['cls']
-            class_name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) \
-                         else f'cls_{cls_id}'
+            class_name = self._cls_name(cls_id)
             dist_m     = det['dist_m']
             conf       = det['conf']
             trig_dist  = self.trigger_dist.get(class_name, 0.60)
