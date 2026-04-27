@@ -24,7 +24,7 @@ class LaneInferenceNode(Node):
         self.declare_parameter('model_path',    _DEFAULT_MODEL_PATH)
         self.declare_parameter('input_topic',   '/oak/rgb/image_raw')
         self.declare_parameter('command_topic', '/automobile/command')
-        self.declare_parameter('desired_speed', 0.3)
+        self.declare_parameter('desired_speed', 0.007)
         self.declare_parameter('debug_view',    True)
         self.declare_parameter('faster',        False)
         self.declare_parameter('SIMULATOR_FLAG', True)
