@@ -7,7 +7,7 @@ import onnxruntime as ort
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 from cv_bridge import CvBridge
 
 from camera_preprocessing.controller3 import Controller
@@ -27,6 +27,7 @@ class LaneInferenceNode(Node):
         self.declare_parameter('desired_speed', 0.3)
         self.declare_parameter('debug_view',    True)
         self.declare_parameter('faster',        False)
+        self.declare_parameter('SIMULATOR_FLAG', True)
 
         model_path         = self.get_parameter('model_path').value
         input_topic        = self.get_parameter('input_topic').value
@@ -34,13 +35,34 @@ class LaneInferenceNode(Node):
         self.desired_speed = self.get_parameter('desired_speed').value
         self.debug_view    = self.get_parameter('debug_view').value
         self.faster        = self.get_parameter('faster').value
+        self.simulator_flag = self.get_parameter('SIMULATOR_FLAG').value
+
+        # On the real car the STM firmware treats the speed field as a
+        # normalized motor command (~PWM duty), not m/s. 0.3 is way too
+        # high; 0.006 is right above the deadband. Override the default
+        # only if the user did NOT pass desired_speed explicitly.
+        if not self.simulator_flag and \
+           self.get_parameter('desired_speed').value == 0.3:
+            self.desired_speed = 0.006
+            self.get_logger().info('Real-car mode: desired_speed adjusted to 0.006')
 
         self.bridge = CvBridge()
 
         self.subscription = self.create_subscription(
             Image, input_topic, self.image_callback, 10)
 
-        self.cmd_pub = self.create_publisher(String, command_topic, 10)
+        # Publishers depend on whether we are talking to the simulator
+        # (single String topic, JSON payload) or to the real STM
+        # firmware (separate Float32 topics for steer/speed/stop).
+        if self.simulator_flag:
+            self.cmd_pub = self.create_publisher(String, command_topic, 10)
+        else:
+            self.steer_pub = self.create_publisher(
+                Float32, '/automobile/command/steer', 10)
+            self.speed_pub = self.create_publisher(
+                Float32, '/automobile/command/speed', 10)
+            self.stop_pub = self.create_publisher(
+                Float32, '/automobile/command/stop', 10)
         
         if not os.path.isfile(model_path):
             self.get_logger().error(f'Modello ONNX non trovato: {model_path}')
@@ -93,13 +115,27 @@ class LaneInferenceNode(Node):
         return blob, debug_frame
 
     def publish_command(self, action: str, value: float) -> None:
-        if action == '1':
-            payload = json.dumps({'action': '1', 'speed': float(value)})
+        """
+        action '1' -> speed,  action '2' -> steerAngle.
+
+        SIMULATOR_FLAG=True  -> JSON String on /automobile/command
+        SIMULATOR_FLAG=False -> Float32 on /automobile/command/{steer,speed}
+        """
+        if self.simulator_flag:
+            if action == '1':
+                payload = json.dumps({'action': '1', 'speed': float(value)})
+            else:
+                payload = json.dumps({'action': '2', 'steerAngle': float(value)})
+            msg = String()
+            msg.data = payload
+            self.cmd_pub.publish(msg)
         else:
-            payload = json.dumps({'action': '2', 'steerAngle': float(value)})
-        msg = String()
-        msg.data = payload
-        self.cmd_pub.publish(msg)
+            msg = Float32()
+            msg.data = float(value)
+            if action == '1':
+                self.speed_pub.publish(msg)
+            else:
+                self.steer_pub.publish(msg)
 
     def image_callback(self, msg: Image) -> None:
         try:
@@ -150,6 +186,24 @@ class LaneInferenceNode(Node):
         )
 
 
+    def emergency_stop(self) -> None:
+        """
+        Send a stop command on shutdown so the motor disarms cleanly.
+        Real-car only. Publishes 0.0 on /automobile/command/stop and
+        also on /automobile/command/speed as a belt-and-braces fallback
+        in case the firmware does not action /stop.
+        """
+        if self.simulator_flag:
+            return
+        try:
+            zero = Float32(); zero.data = 0.0
+            self.stop_pub.publish(zero)
+            self.speed_pub.publish(zero)
+            self.get_logger().info('Emergency stop sent on /automobile/command/stop')
+        except Exception as e:
+            self.get_logger().error(f'Emergency stop failed: {e}')
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = LaneInferenceNode()
@@ -158,6 +212,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.emergency_stop()
         node.destroy_node()
         try:
             rclpy.shutdown()
