@@ -290,50 +290,170 @@ class TrafficSignNode(Node):
     def _build_oak_pipeline(self):
         import depthai as dai
 
-        # Salva device e pipeline come attributi di classe per evitare il garbage collection
         self._device   = dai.Device()
         self._pipeline = dai.Pipeline(self._device)
 
-        # RGB camera
-        cam = self._pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
-        # Salva anche il riferimento all'output
-        self._cam_out = cam.requestOutput(
-            (self.imgsz, self.imgsz), dai.ImgFrame.Type.BGR888p)
+        # ── RGB camera ────────────────────────────────────────────────────────
+        cam = self._pipeline.create(dai.node.Camera).build(
+            dai.CameraBoardSocket.CAM_A)
+        #self._cam_out = cam.requestOutput(
+            #(self.imgsz, self.imgsz), dai.ImgFrame.Type.BGR888p)
+        
+        self._cam_out = cam.requestOutput((1280, 720), dai.ImgFrame.Type.BGR888p)
+        # ── Mono cameras ──────────────────────────────────────────────────────
+        mono_l = self._pipeline.create(dai.node.Camera).build(
+            dai.CameraBoardSocket.CAM_B)
+        mono_r = self._pipeline.create(dai.node.Camera).build(
+            dai.CameraBoardSocket.CAM_C)
 
-        # Stereo depth
+        # ── Stereo depth ──────────────────────────────────────────────────────
+        # self._stereo = self._pipeline.create(dai.node.StereoDepth)
+
+        # # v3 preset enum is PresetMode (not PresetType — that was v2)
+        # self._stereo.setDefaultProfilePreset(
+        #     dai.node.StereoDepth.PresetMode.FAST_DENSITY)
+        # self._stereo.setLeftRightCheck(True)
+        # self._stereo.setSubpixel(True)
+
+        # self._stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+
+        # self._stereo.setOutputSize(1280, 720)
+
+        # ── Stereo depth ──────────────────────────────────────────────────────
         self._stereo = self._pipeline.create(dai.node.StereoDepth)
+
+        # self._stereo.initialConfig.postProcessing.temporalFilter.enable = True
+        # self._stereo.initialConfig.postProcessing.temporalFilter.persistencyMode = (
+        #     dai.StereoDepthConfig.PostProcessing.TemporalFilter
+        #     .PersistencyMode.VALID_2_IN_LAST_4
+        # )
+        # self._stereo.initialConfig.postProcessing.spatialFilter.enable = True
+        # self._stereo.initialConfig.postProcessing.spatialFilter.holeFillingRadius = 2
+        # self._stereo.initialConfig.postProcessing.spatialFilter.numIterations = 1
+        # self._stereo.initialConfig.postProcessing.thresholdFilter.minRange = self.depth_min_mm
+        # self._stereo.initialConfig.postProcessing.thresholdFilter.maxRange = self.depth_max_mm
+
+        self._stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
         self._stereo.setLeftRightCheck(True)
-        self._stereo.setSubpixel(True)
-        self._stereo.setDefaultProfilePreset(
-            dai.node.StereoDepth.PresetMode.FAST_DENSITY)
 
-        mono_l = self._pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
-        mono_r = self._pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
-        mono_l.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8).link(self._stereo.left)
-        mono_r.requestOutput((640, 400), dai.ImgFrame.Type.GRAY8).link(self._stereo.right)
+        # FIX 1: Disable Subpixel and Enable Extended Disparity for close-range objects
+        self._stereo.setSubpixel(False)
+        self._stereo.setExtendedDisparity(True)
 
-        # Output queues (ora salvate direttamente in self)
-        self._q_rgb  = self._cam_out.createOutputQueue(maxSize=2, blocking=False)
-        self._q_disp = self._stereo.disparity.createOutputQueue(maxSize=2, blocking=False)
+        self._stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+        self._stereo.setOutputSize(1280, 720)
 
-        # Avvia esplicitamente la pipeline
-        self._pipeline.start()
+        mono_l.requestOutput(
+            (640, 400), dai.ImgFrame.Type.GRAY8).link(self._stereo.left)
+        mono_r.requestOutput(
+            (640, 400), dai.ImgFrame.Type.GRAY8).link(self._stereo.right)
+
+        self._q_rgb   = self._cam_out.createOutputQueue(
+            maxSize=2, blocking=False)
+        self._q_depth = self._stereo.depth.createOutputQueue(
+            maxSize=2, blocking=False)
+        
+        self._q_disp_vis = self._stereo.disparity.createOutputQueue(maxSize=2, blocking=False)
         self._max_disp = self._stereo.initialConfig.getMaxDisparity()
 
+        self._pipeline.start()
+    
     # ── Preprocess ────────────────────────────────────────────────────────────
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        img  = cv2.resize(frame, (self.imgsz, self.imgsz))
-        img  = img.astype(np.float32) / 255.0
-        blob = np.transpose(img, (2, 0, 1))[np.newaxis, ...]
+    #     self._cam_out = cam.requestOutput(
+    # (1280, 720), dai.ImgFrame.Type.BGR888p)img  = cv2.resize(frame, (self.imgsz, self.imgsz))
+    #     img  = img.astype(np.float32) / 255.0
+    #     blob = np.transpose(img, (2, 0, 1))[np.newaxis, ...]
+    #     return np.ascontiguousarray(blob)
+        """Letterbox frame to imgsz×imgsz, preserving aspect ratio."""
+        fh, fw = frame.shape[:2]
+        scale  = self.imgsz / max(fh, fw)          # 640 / 1280 = 0.5
+        new_w  = int(fw * scale)                    # 640
+        new_h  = int(fh * scale)                    # 360
+        resized = cv2.resize(frame, (new_w, new_h))
+
+        # Padding to make it square
+        pad_top  = (self.imgsz - new_h) // 2       # 140
+        pad_bot  = self.imgsz - new_h - pad_top     # 140
+        pad_left = (self.imgsz - new_w) // 2       # 0
+        pad_right= self.imgsz - new_w - pad_left    # 0
+
+        blob_img = cv2.copyMakeBorder(
+            resized, pad_top, pad_bot, pad_left, pad_right,
+            cv2.BORDER_CONSTANT, value=(114, 114, 114))
+
+        # Store for postprocess
+        self._lb_scale = scale
+        self._lb_pad   = (pad_top, pad_left)
+
+        blob = np.transpose(blob_img.astype(np.float32) / 255.0, (2, 0, 1))[np.newaxis]
         return np.ascontiguousarray(blob)
 
     # ── YOLOv8 postprocess ────────────────────────────────────────────────────
+    #def _postprocess(self, output: np.ndarray, orig_h: int, orig_w: int):
+        # pred       = output[0].T
+        # boxes      = pred[:, :4]
+        # class_conf = pred[:, 4:]
+        # scores     = np.max(class_conf, axis=1)
+        # cls_ids    = np.argmax(class_conf, axis=1)
+
+        # mask    = scores >= self.conf_threshold
+        # boxes   = boxes[mask]
+        # scores  = scores[mask]
+        # cls_ids = cls_ids[mask]
+
+        # if len(boxes) == 0:
+        #     return []
+
+        # # YOLOv8 ONNX outputs pixel coords in imgsz space — just clip, no scaling
+        # cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+
+        # # Scale from imgsz space → original frame space
+        # sx = orig_w / self.imgsz
+        # sy = orig_h / self.imgsz
+
+        # x1 = np.clip((cx - w / 2) * sx, 0, orig_w - 1)
+        # y1 = np.clip((cy - h / 2) * sy, 0, orig_h - 1)
+        # x2 = np.clip((cx + w / 2) * sx, 0, orig_w - 1)
+        # y2 = np.clip((cy + h / 2) * sy, 0, orig_h - 1)
+
+        # detections = []
+        # for cls_id in np.unique(cls_ids):
+        #     idx = np.where(cls_ids == cls_id)[0]
+
+        #     # FIX: NMSBoxes wants [x, y, w, h] — not [x1, y1, x2, y2]
+        #     nms_boxes = np.stack([
+        #         x1[idx],
+        #         y1[idx],
+        #         x2[idx] - x1[idx],   # width
+        #         y2[idx] - y1[idx],   # height
+        #     ], axis=1)
+
+        #     s    = scores[idx]
+        #     keep = cv2.dnn.NMSBoxes(
+        #         nms_boxes.tolist(), s.tolist(),
+        #         self.conf_threshold, self.iou_threshold
+        #     )
+
+        #     for k in keep:
+        #         ki = k[0] if isinstance(k, (list, tuple, np.ndarray)) else int(k)
+        #         detections.append({
+        #             'cls':  int(cls_ids[idx[ki]]),
+        #             'conf': float(scores[idx[ki]]),
+        #             'x1':   int(x1[idx[ki]]),
+        #             'y1':   int(y1[idx[ki]]),
+        #             'x2':   int(x2[idx[ki]]),
+        #             'y2':   int(y2[idx[ki]]),
+        #         })
+
+        # return detections
+
     def _postprocess(self, output: np.ndarray, orig_h: int, orig_w: int):
         pred       = output[0].T
-        boxes      = pred[:, :4]
         class_conf = pred[:, 4:]
         scores     = np.max(class_conf, axis=1)
         cls_ids    = np.argmax(class_conf, axis=1)
+        boxes      = pred[:, :4]
 
         mask    = scores >= self.conf_threshold
         boxes   = boxes[mask]
@@ -343,54 +463,120 @@ class TrafficSignNode(Node):
         if len(boxes) == 0:
             return []
 
-        cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-        x1 = (cx - w / 2) * orig_w
-        y1 = (cy - h / 2) * orig_h
-        x2 = (cx + w / 2) * orig_w
-        y2 = (cy + h / 2) * orig_h
+        cx, cy, w, h = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
+
+        # YOLO coords are in letterboxed imgsz space — undo letterbox
+        pad_top, pad_left = self._lb_pad
+        scale             = self._lb_scale
+
+        x1 = np.clip(((cx - w/2) - pad_left) / scale, 0, orig_w - 1)
+        y1 = np.clip(((cy - h/2) - pad_top)  / scale, 0, orig_h - 1)
+        x2 = np.clip(((cx + w/2) - pad_left) / scale, 0, orig_w - 1)
+        y2 = np.clip(((cy + h/2) - pad_top)  / scale, 0, orig_h - 1)
 
         detections = []
         for cls_id in np.unique(cls_ids):
-            idx  = np.where(cls_ids == cls_id)[0]
-            b    = np.stack([x1[idx], y1[idx], x2[idx], y2[idx]], axis=1)
-            s    = scores[idx]
+            idx = np.where(cls_ids == cls_id)[0]
+            nms_boxes = np.stack([
+                x1[idx], y1[idx],
+                x2[idx] - x1[idx],   # w
+                y2[idx] - y1[idx],   # h
+            ], axis=1)
             keep = cv2.dnn.NMSBoxes(
-                b.tolist(), s.tolist(),
-                self.conf_threshold, self.iou_threshold
-            )
+                nms_boxes.tolist(), scores[idx].tolist(),
+                self.conf_threshold, self.iou_threshold)
             for k in keep:
-                ki = k[0] if isinstance(k, (list, tuple, np.ndarray)) else k
+                ki = k[0] if isinstance(k, (list, tuple, np.ndarray)) else int(k)
                 detections.append({
                     'cls':  int(cls_ids[idx[ki]]),
                     'conf': float(scores[idx[ki]]),
-                    'x1':   int(np.clip(x1[idx[ki]], 0, orig_w)),
-                    'y1':   int(np.clip(y1[idx[ki]], 0, orig_h)),
-                    'x2':   int(np.clip(x2[idx[ki]], 0, orig_w)),
-                    'y2':   int(np.clip(y2[idx[ki]], 0, orig_h)),
+                    'x1':   int(x1[idx[ki]]),
+                    'y1':   int(y1[idx[ki]]),
+                    'x2':   int(x2[idx[ki]]),
+                    'y2':   int(y2[idx[ki]]),
                 })
-                
-        return detections
+        return detections   
 
     # ── Distance (OAK mode only) ───────────────────────────────────────────────
-    def _get_distance_m(self, disp, x1, y1, x2, y2) -> float:
-        if disp is None:
+    # def _get_distance_m(self, depth_frame: np.ndarray,
+    #                 x1: int, y1: int, x2: int, y2: int) -> float:
+    #     """
+    #     Sample the central ROI of a bbox from the depth frame.
+    #     depth_frame: uint16 numpy array, values in mm, aligned to RGB.
+    #     Returns distance in metres, or -1.0 if unreliable.
+    #     """
+        # if depth_frame is None:
+        #     return -1.0
+
+        # dh, dw = depth_frame.shape[:2]
+
+        # # Scale bbox from RGB-frame space → depth-frame space.
+        # # After setDepthAlign these should match, but scaling is
+        # # safe even if resolutions differ slightly.
+        # sx = dw / self.imgsz
+        # sy = dh / self.imgsz
+        # dx1 = int(np.clip(x1 * sx, 0, dw - 1))
+        # dy1 = int(np.clip(y1 * sy, 0, dh - 1))
+        # dx2 = int(np.clip(x2 * sx, 0, dw - 1))
+        # dy2 = int(np.clip(y2 * sy, 0, dh - 1))
+
+        # # Central 50% of the bbox — avoids sign edges bleeding
+        # # into the (farther) background
+        # cx, cy = (dx1 + dx2) // 2, (dy1 + dy2) // 2
+        # rw = max(1, (dx2 - dx1) // 4)
+        # rh = max(1, (dy2 - dy1) // 4)
+        # roi = depth_frame[max(0, cy - rh): cy + rh,
+        #                 max(0, cx - rw): cx + rw]
+
+        # valid = roi[(roi > self.depth_min_mm) & (roi < self.depth_max_mm)]
+        # if valid.size == 0:
+        #     return -1.0
+
+        # return float(np.median(valid)) / 1000.0   # mm → metres
+
+    # def _get_distance_m(self, depth_frame, x1, y1, x2, y2):
+    #     if depth_frame is None:
+    #         return -1.0
+
+    #     # No scaling needed — depth is already resized to RGB frame space
+    #     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    #     rw = max(1, (x2 - x1) // 6)
+    #     rh = max(1, (y2 - y1) // 6)
+
+    #     dh, dw = depth_frame.shape[:2]
+    #     roi = depth_frame[
+    #         max(0, cy - rh): min(dh, cy + rh),
+    #         max(0, cx - rw): min(dw, cx + rw)
+    #     ]
+
+    #     valid = roi[(roi > self.depth_min_mm) & (roi < self.depth_max_mm)]
+    #     if valid.size == 0:
+    #         return -1.0
+
+    #     return float(np.percentile(valid, 15)) / 1000.0
+
+    def _get_distance_m(self, depth_frame, x1, y1, x2, y2) -> float:
+        if depth_frame is None:
             return -1.0
-        BASELINE_MM = 75.0
-        FOCAL_PX    = 880.0
-        cx  = (x1 + x2) // 2
-        cy  = (y1 + y2) // 2
-        rw  = max(1, (x2 - x1) // 4)
-        rh  = max(1, (y2 - y1) // 4)
-        roi = disp[max(0, cy-rh):cy+rh, max(0, cx-rw):cx+rw]
-        if roi.size == 0:
+
+        dh, dw = depth_frame.shape[:2]   # 720, 1280
+        # bbox coords are already in 1280×720 space — just clip, no scaling
+        dx1 = int(np.clip(x1, 0, dw - 1))
+        dy1 = int(np.clip(y1, 0, dh - 1))
+        dx2 = int(np.clip(x2, 0, dw - 1))
+        dy2 = int(np.clip(y2, 0, dh - 1))
+
+        cx, cy = (dx1 + dx2) // 2, (dy1 + dy2) // 2
+        rw = max(1, (dx2 - dx1) // 4)
+        rh = max(1, (dy2 - dy1) // 4)
+
+        roi = depth_frame[max(0, cy-rh): cy+rh,
+                        max(0, cx-rw): cx+rw]
+
+        valid = roi[(roi > self.depth_min_mm) & (roi < self.depth_max_mm)]
+        if valid.size == 0:
             return -1.0
-        med = np.median(roi[roi > 0])
-        if med <= 0:
-            return -1.0
-        depth_mm = (BASELINE_MM * FOCAL_PX) / med
-        if not (self.depth_min_mm < depth_mm < self.depth_max_mm):
-            return -1.0
-        return depth_mm / 1000.0
+        return float(np.median(valid)) / 1000.0
 
     # ── Publish detection ─────────────────────────────────────────────────────
     def _publish_detection(self, class_name, dist_m, conf):
@@ -411,51 +597,299 @@ class TrafficSignNode(Node):
                else f'cls_{cls_id}'
 
     # ── 20 Hz callback ────────────────────────────────────────────────────────
-    def _cb(self) -> None:
-        disp = None
+    # def _cb(self) -> None:
+    #     disp = None
 
+    #     if self.use_sim:
+    #         frame = self._frame
+    #     elif self.use_mock:
+    #         ret, frame = self._cap.read()
+    #         if not ret:
+    #             self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    #             ret, frame = self._cap.read()
+    #         frame = frame if ret else None
+    #     else:
+    #         try:
+    #             in_rgb  = self._q_rgb.tryGet()
+    #             #in_depth    = self._q_depth.tryGet()
+    #             frame   = in_rgb.getCvFrame()  if in_rgb  else None
+    #             #depth_frame = in_depth.getFrame() if in_depth else None
+    #             # In _cb, right after getting depth_frame from the queue:
+    #             in_depth = self._q_depth.tryGet()
+    #             if in_depth is not None:
+    #                 depth_frame = in_depth.getFrame()
+    #                 # Resize depth to match RGB frame so coordinates align 1:1
+    #                 depth_frame = cv2.resize(
+    #                     depth_frame,
+    #                     (frame.shape[1], frame.shape[0]),  # (W, H) of RGB frame
+    #                     interpolation=cv2.INTER_NEAREST    # NEAREST — never interpolate depth values
+    #                 )
+    #         except Exception as e:
+    #             self.get_logger().warn(f'Queue error: {e}')
+    #             return # Esce dalla callback e aspetta il prossimo ciclo
+
+    #     if frame is None:
+    #         return
+
+    #     H, W = frame.shape[:2]
+
+    #     output = self.session.run(
+    #         None, {self.input_name: self._preprocess(frame)})
+    #     dets   = self._postprocess(output[0], H, W)
+
+    #     for det in dets:
+    #         det['dist_m'] = self._get_distance_m(
+    #             depth_frame, det['x1'], det['y1'], det['x2'], det['y2'])
+
+    #     # Sort by distance if available, otherwise keep all detections
+    #     dets_with_dist = [d for d in dets if d['dist_m'] > 0]
+    #     if dets_with_dist:
+    #         dets = sorted(dets_with_dist, key=lambda d: d['dist_m'])
+    #     # else: keep all dets without depth filter (close range or flat objects)
+
+    #     # Draw
+    #     annotated = frame.copy()
+    #     mode_str  = 'SIM' if self.use_sim else ('MOCK' if self.use_mock else 'OAK')
+    #     cv2.putText(annotated, f'[{mode_str}] {len(dets)} sign(s)',
+    #                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
+
+    #     for i, det in enumerate(dets):
+    #         cls_id     = det['cls']
+    #         class_name = self._cls_name(cls_id)
+    #         color      = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
+    #         x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
+
+    #         cv2.rectangle(annotated, (x1, y1), (x2, y2), color,
+    #                       3 if i == 0 else 1)
+    #         if i == 0:
+    #             cv2.rectangle(annotated,
+    #                           (x1-3, y1-3), (x2+3, y2+3), (255,255,255), 1)
+
+    #         dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
+    #         label    = f"{class_name} {dist_str} ({det['conf']:.0%})"
+    #         (tw, th), _ = cv2.getTextSize(
+    #             label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    #         cv2.rectangle(annotated,
+    #                       (x1, y1-th-10), (x1+tw+4, y1), color, -1)
+    #         cv2.putText(annotated, label, (x1+2, y1-5),
+    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
+
+    #     # Trigger
+    #     now = time.time()
+    #     if dets:
+    #         det        = dets[0]
+    #         cls_id     = det['cls']
+    #         class_name = self._cls_name(cls_id)
+    #         dist_m     = det['dist_m']
+    #         conf       = det['conf']
+    #         trig_dist  = self.trigger_dist.get(class_name, 0.60)
+    #         trig_cool  = self.cooldown.get(class_name, 5.0)
+
+    #         # In OAK mode: use distance if available, else trigger on confidence only
+    #         distance_ok = (dist_m <= trig_dist) if dist_m > 0 else True
+    #         cooldown_ok = (now - self.last_trigger.get(class_name, 0.0)) \
+    #                       >= trig_cool
+
+    #         if distance_ok and cooldown_ok:
+    #             self._publish_detection(class_name, dist_m, conf)
+    #             self.last_trigger[class_name] = now
+    #             cv2.putText(annotated, f'*** TRIGGER: {class_name} ***',
+    #                         (10, 85), cv2.FONT_HERSHEY_SIMPLEX,
+    #                         0.8, (0,0,255), 2)
+
+    #         label_hdr = (f"CLOSEST: {class_name}  {dist_m:.2f}m"
+    #                      if dist_m > 0 else f"DETECTED: {class_name}")
+    #         cv2.putText(annotated, label_hdr, (10, 55),
+    #                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+
+    #     # Publish annotated image — pure NumPy, no cv_bridge
+    #     try:
+    #         self.img_pub.publish(cv2_to_imgmsg(annotated))
+    #     except Exception as e:
+    #         self.get_logger().warn(f'img publish: {e}')
+
+    #     # Debug window
+    #     if self.debug_view:
+    #         debug_frame = annotated.copy()
+
+    #         # # ── Depth heatmap ─────────────────────────────────────────────────────
+    #         # in_disp_vis = self._q_disp_vis.tryGet() if not self.use_sim \
+    #         #                                         and not self.use_mock else None
+    #         # if in_disp_vis is not None:
+    #         #     disp_raw = in_disp_vis.getFrame()   # uint16 or uint8 depending on subpixel
+
+    #         #     # Normalize to 0-255 for colormap
+    #         #     disp_norm = (disp_raw.astype(np.float32) / self._max_disp * 255).clip(0, 255)
+    #         #     disp_color = cv2.applyColorMap(
+    #         #         disp_norm.astype(np.uint8), cv2.COLORMAP_MAGMA)
+
+    #         #     # Resize to match RGB frame
+    #         #     disp_color = cv2.resize(disp_color, (self.imgsz, self.imgsz))
+
+    #         #     # Draw bboxes on heatmap too so you can verify alignment
+    #         #     for det in dets:
+    #         #         cls_id = det['cls']
+    #         #         color  = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
+    #         #         cv2.rectangle(disp_color,
+    #         #                     (det['x1'], det['y1']),
+    #         #                     (det['x2'], det['y2']), color, 2)
+    #         #         # Draw the ROI that is actually sampled for distance
+    #         #         cx = (det['x1'] + det['x2']) // 2
+    #         #         cy = (det['y1'] + det['y2']) // 2
+    #         #         rw = max(1, (det['x2'] - det['x1']) // 4)
+    #         #         rh = max(1, (det['y2'] - det['y1']) // 4)
+    #         #         cv2.rectangle(disp_color,
+    #         #                     (cx - rw, cy - rh), (cx + rw, cy + rh),
+    #         #                     (255, 255, 255), 1)   # white = sampled ROI
+    #         #         dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
+    #         #         cv2.putText(disp_color, dist_str, (det['x1'], det['y1'] - 5),
+    #         #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    #         #     # Add legend
+    #         #     cv2.putText(disp_color, 'DEPTH (warm=near, cold=far)',
+    #         #                 (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+
+    #         #     debug_frame = np.hstack([annotated, disp_color])
+
+    #         # # ── Depth heatmap ─────────────────────────────────────────────────────
+    #         # # FIX 2: Visualize the aligned depth_frame, not the unaligned disparity queue
+    #         # if depth_frame is not None and not self.use_sim and not self.use_mock:
+                
+    #         #     # depth_frame is in mm. Clip to a sensible max distance for visualization (e.g., 5000mm)
+    #         #     max_vis_dist_mm = 5000
+    #         #     disp_norm = (depth_frame.astype(np.float32) / max_vis_dist_mm * 255).clip(0, 255)
+                
+    #         #     # Invert so close objects are warm/bright, and far objects are cold/dark
+    #         #     disp_norm = 255 - disp_norm
+    #         #     disp_color = cv2.applyColorMap(disp_norm.astype(np.uint8), cv2.COLORMAP_MAGMA)
+
+    #         #     # Resize to match the RGB frame dynamically
+    #         #     disp_color = cv2.resize(disp_color, (annotated.shape[1], annotated.shape[0]))
+
+    #         #     # Draw bboxes on the aligned heatmap
+    #         #     for det in dets:
+    #         #         cls_id = det['cls']
+    #         #         color  = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
+    #         #         cv2.rectangle(disp_color, (det['x1'], det['y1']), (det['x2'], det['y2']), color, 2)
+                    
+    #         #         dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
+    #         #         cv2.putText(disp_color, dist_str, (det['x1'], det['y1'] - 5),
+    #         #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    #         #     debug_frame = np.hstack([annotated, disp_color])
+
+    #         # ── Depth heatmap ─────────────────────────────────────────────────────
+    #         in_disp_vis = self._q_disp_vis.tryGet() if not self.use_sim and not self.use_mock else None
+            
+    #         if in_disp_vis is not None:
+    #             disp_raw = in_disp_vis.getFrame()
+                
+    #             # Normalizza la disparità (0-190 per Extended Disparity) a 0-255
+    #             disp_norm = (disp_raw.astype(np.float32) / 190.0 * 255).clip(0, 255)
+    #             disp_color = cv2.applyColorMap(disp_norm.astype(np.uint8), cv2.COLORMAP_MAGMA)
+
+    #             # Ridimensiona per combaciare dinamicamente con il frame RGB
+    #             disp_color = cv2.resize(disp_color, (annotated.shape[1], annotated.shape[0]))
+
+    #             # Disegna i bounding box sulla heatmap
+    #             for det in dets:
+    #                 cls_id = det['cls']
+    #                 color  = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
+    #                 cv2.rectangle(disp_color,
+    #                             (det['x1'], det['y1']),
+    #                             (det['x2'], det['y2']), color, 2)
+                    
+    #                 # Disegna la ROI centrale usata per calcolare la distanza
+    #                 cx = (det['x1'] + det['x2']) // 2
+    #                 cy = (det['y1'] + det['y2']) // 2
+    #                 rw = max(1, (det['x2'] - det['x1']) // 4)
+    #                 rh = max(1, (det['y2'] - det['y1']) // 4)
+    #                 cv2.rectangle(disp_color,
+    #                             (cx - rw, cy - rh), (cx + rw, cy + rh),
+    #                             (255, 255, 255), 1)   
+                    
+    #                 dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
+    #                 cv2.putText(disp_color, dist_str, (det['x1'], det['y1'] - 5),
+    #                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    #             # Aggiungi la legenda
+    #             cv2.putText(disp_color, 'DEPTH (warm=near, cold=far)',
+    #                         (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+
+    #             debug_frame = np.hstack([annotated, disp_color])
+
+    #         cv2.imshow('Traffic Sign Detection', debug_frame)
+
+    #         # ── Console stats for every detection ─────────────────────────────────
+    #         if dets:
+    #             self.get_logger().info('─' * 55)
+    #             for i, det in enumerate(dets):
+    #                 tag = ' ← NEAREST' if i == 0 else ''
+    #                 self.get_logger().info(
+    #                     f"  [{i}] {self._cls_name(det['cls']):<20} "
+    #                     f"dist={det['dist_m']:>6.3f}m  "
+    #                     f"conf={det['conf']:.0%}  "
+    #                     f"bbox=({det['x1']},{det['y1']})-({det['x2']},{det['y2']})"
+    #                     f"{tag}"
+    #                 )
+
+    #         cv2.waitKey(1)
+
+    def _cb(self) -> None:
+        depth_frame = None
+
+        # ── Frame acquisition ─────────────────────────────────────────────────
         if self.use_sim:
             frame = self._frame
+
         elif self.use_mock:
             ret, frame = self._cap.read()
             if not ret:
                 self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = self._cap.read()
             frame = frame if ret else None
+
         else:
             try:
-                in_rgb  = self._q_rgb.tryGet()
-                in_disp = self._q_disp.tryGet()
-                frame   = in_rgb.getCvFrame()  if in_rgb  else None
-                disp    = in_disp.getFrame()   if in_disp else None
+                in_rgb   = self._q_rgb.tryGet()
+                in_depth = self._q_depth.tryGet()
+                frame       = in_rgb.getCvFrame()   if in_rgb   else None
+                depth_frame = in_depth.getFrame()   if in_depth else None
             except Exception as e:
                 self.get_logger().warn(f'Queue error: {e}')
-                return # Esce dalla callback e aspetta il prossimo ciclo
+                return
 
         if frame is None:
             return
 
-        H, W = frame.shape[:2]
+        H, W = frame.shape[:2]   # 720, 1280 in OAK mode
 
+        # ── Inference ─────────────────────────────────────────────────────────
         output = self.session.run(
             None, {self.input_name: self._preprocess(frame)})
-        dets   = self._postprocess(output[0], H, W)
+        dets = self._postprocess(output[0], H, W)
 
+        # ── Attach distance to every detection ────────────────────────────────
         for det in dets:
             det['dist_m'] = self._get_distance_m(
-                disp, det['x1'], det['y1'], det['x2'], det['y2'])
+                depth_frame, det['x1'], det['y1'], det['x2'], det['y2'])
 
-        # Sort by distance if available, otherwise keep all detections
-        dets_with_dist = [d for d in dets if d['dist_m'] > 0]
-        if dets_with_dist:
-            dets = sorted(dets_with_dist, key=lambda d: d['dist_m'])
-        # else: keep all dets without depth filter (close range or flat objects)
+        # ── Sort by distance (valid first, then unknown) ───────────────────────
+        dets_with_dist    = [d for d in dets if d['dist_m'] > 0]
+        dets_without_dist = [d for d in dets if d['dist_m'] <= 0]
+        dets = sorted(dets_with_dist, key=lambda d: d['dist_m']) + dets_without_dist
 
-        # Draw
+        # ── Annotate RGB frame ────────────────────────────────────────────────
         annotated = frame.copy()
         mode_str  = 'SIM' if self.use_sim else ('MOCK' if self.use_mock else 'OAK')
         cv2.putText(annotated, f'[{mode_str}] {len(dets)} sign(s)',
-                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        
+
+        # Find nearest candidate here so we can highlight it while drawing
+        nearest = next((d for d in dets if d['dist_m'] > 0), None)
+        if nearest is None and dets:
+            nearest = max(dets, key=lambda d: d['conf'])
 
         for i, det in enumerate(dets):
             cls_id     = det['cls']
@@ -463,59 +897,138 @@ class TrafficSignNode(Node):
             color      = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
             x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
 
+            is_nearest = (det is nearest)
+
+            # Thicker box + white outline for the nearest sign
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color,
-                          3 if i == 0 else 1)
-            if i == 0:
+                        3 if i == 0 else 1)
+            if is_nearest:
                 cv2.rectangle(annotated,
-                              (x1-3, y1-3), (x2+3, y2+3), (255,255,255), 1)
+                            (x1 - 3, y1 - 3), (x2 + 3, y2 + 3),
+                            (255, 255, 255), 1)
 
             dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
             label    = f"{class_name} {dist_str} ({det['conf']:.0%})"
+            if is_nearest:
+                label += ' [NEAREST]'
+
             (tw, th), _ = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
             cv2.rectangle(annotated,
-                          (x1, y1-th-10), (x1+tw+4, y1), color, -1)
-            cv2.putText(annotated, label, (x1+2, y1-5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1)
+                        (x1, y1 - th - 10), (x1 + tw + 4, y1), color, -1)
+            cv2.putText(annotated, label, (x1 + 2, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-        # Trigger
+        # ── Trigger logic ─────────────────────────────────────────────────────
         now = time.time()
-        if dets:
-            det        = dets[0]
-            cls_id     = det['cls']
+        if nearest is not None:
+            cls_id     = nearest['cls']
             class_name = self._cls_name(cls_id)
-            dist_m     = det['dist_m']
-            conf       = det['conf']
+            dist_m     = nearest['dist_m']
+            conf       = nearest['conf']
             trig_dist  = self.trigger_dist.get(class_name, 0.60)
             trig_cool  = self.cooldown.get(class_name, 5.0)
 
-            # In OAK mode: use distance if available, else trigger on confidence only
-            distance_ok = (dist_m <= trig_dist) if dist_m > 0 else True
-            cooldown_ok = (now - self.last_trigger.get(class_name, 0.0)) \
-                          >= trig_cool
+            distance_ok = (0 < dist_m <= trig_dist)
+            cooldown_ok = (now - self.last_trigger.get(class_name, 0.0)) >= trig_cool
 
             if distance_ok and cooldown_ok:
                 self._publish_detection(class_name, dist_m, conf)
                 self.last_trigger[class_name] = now
                 cv2.putText(annotated, f'*** TRIGGER: {class_name} ***',
                             (10, 85), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.8, (0,0,255), 2)
+                            0.8, (0, 0, 255), 2)
 
-            label_hdr = (f"CLOSEST: {class_name}  {dist_m:.2f}m"
-                         if dist_m > 0 else f"DETECTED: {class_name}")
+            label_hdr = (f"NEAREST: {class_name}  {dist_m:.2f}m"
+                        if dist_m > 0 else f"DETECTED: {class_name} (no depth)")
             cv2.putText(annotated, label_hdr, (10, 55),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-        # Publish annotated image — pure NumPy, no cv_bridge
+        # ── Publish annotated image ────────────────────────────────────────────
         try:
-            self.img_pub.publish(cv2_to_imgmsg(annotated))
+            # Resize to imgsz square for the ROS topic
+            pub_frame = cv2.resize(annotated, (self.imgsz, self.imgsz))
+            self.img_pub.publish(cv2_to_imgmsg(pub_frame))
         except Exception as e:
             self.get_logger().warn(f'img publish: {e}')
 
-        # Debug window
+        # ── Debug window ──────────────────────────────────────────────────────
         if self.debug_view:
-            cv2.imshow('Traffic Sign Detection', annotated)
+            # Resize RGB to 640×360 for display (keeps 16:9)
+            rgb_vis = cv2.resize(annotated, (640, 360))
+
+            # Depth heatmap panel
+            in_disp_vis = None
+            if not self.use_sim and not self.use_mock:
+                in_disp_vis = self._q_disp_vis.tryGet()
+
+            if in_disp_vis is not None:
+                disp_raw = in_disp_vis.getFrame()
+
+                # Normalise disparity → 0-255 colourmap
+                disp_norm  = (disp_raw.astype(np.float32) / self._max_disp * 255
+                            ).clip(0, 255)
+                disp_color = cv2.applyColorMap(
+                    disp_norm.astype(np.uint8), cv2.COLORMAP_MAGMA)
+
+                # Resize to 640×360 to match rgb_vis
+                disp_color = cv2.resize(disp_color, (640, 360))
+
+                # Draw bboxes on depth panel — coords are in 1280×720,
+                # scale down to 640×360 for display
+                sx_vis = 640 / W
+                sy_vis = 360 / H
+                for det in dets:
+                    cls_id = det['cls']
+                    color  = CLASS_COLORS_BGR[cls_id % len(CLASS_COLORS_BGR)]
+                    is_nearest = (det is nearest)
+                    vx1 = int(det['x1'] * sx_vis)
+                    vy1 = int(det['y1'] * sy_vis)
+                    vx2 = int(det['x2'] * sx_vis)
+                    vy2 = int(det['y2'] * sy_vis)
+                    
+                    cv2.rectangle(disp_color, (vx1, vy1), (vx2, vy2), color, 2)
+
+                    # White inner rectangle = sampled ROI
+                    cx = (vx1 + vx2) // 2
+                    cy = (vy1 + vy2) // 2
+                    rw = max(1, (vx2 - vx1) // 4)
+                    rh = max(1, (vy2 - vy1) // 4)
+                    cv2.rectangle(disp_color,
+                                (cx - rw, cy - rh), (cx + rw, cy + rh),
+                                (255, 255, 255), 1)
+
+                    dist_str = f"{det['dist_m']:.2f}m" if det['dist_m'] > 0 else 'n/a'
+                    cv2.putText(disp_color, dist_str, (vx1, vy1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+                cv2.putText(disp_color, 'DEPTH (warm=near, cold=far)',
+                            (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+                debug_frame = np.hstack([rgb_vis, disp_color])
+            else:
+                # No depth frame yet (SIM / MOCK mode or stereo not ready)
+                debug_frame = rgb_vis
+
+            cv2.imshow('Traffic Sign Detection', debug_frame)
+
+            # ── Console stats ─────────────────────────────────────────────────
+            # ── Console stats — all detections ranked ─────────────────────────
+            if dets:
+                self.get_logger().info('─' * 55)
+                for i, det in enumerate(dets):
+                    tag = ' ← TRIGGER CANDIDATE' if det is nearest else ''
+                    self.get_logger().info(
+                        f"  [{i}] {self._cls_name(det['cls']):<20} "
+                        f"dist={det['dist_m']:>6.3f}m  "
+                        f"conf={det['conf']:.0%}  "
+                        f"bbox=({det['x1']},{det['y1']})-"
+                        f"({det['x2']},{det['y2']})"
+                        f"{tag}"
+                    )
+
             cv2.waitKey(1)
+
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     def destroy_node(self):
