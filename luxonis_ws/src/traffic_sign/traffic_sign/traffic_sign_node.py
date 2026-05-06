@@ -29,12 +29,7 @@ CLASS_NAMES = [
     'no_entry',          # 5
     'exit_highway',      # 6
     'entrance_highway',  # 7
-    'crosswalk',         # 8
-    'pedestrian',        # 9
-    'car',               # 10
-    'trafficlight',      # 11
-    'stopline',          # 12
-    'roadblock',         # 13
+    'crosswalk'         # 8
 ]
 
 # BGR colors (note: OpenCV uses BGR, not RGB).
@@ -47,12 +42,7 @@ CLASS_COLORS_BGR = [
     (30,   30, 150),   # no_entry          — dark red
     (0,    90, 160),   # exit_highway      — brown/orange
     (220, 120,   0),   # entrance_highway  — blue
-    (50,  200,  50),   # crosswalk         — light green
-    (90,   90,  90),   # pedestrian        — gray
-    (90,  185,  90),   # car               — light green-gray
-    (90,   90, 200),   # trafficlight      — soft red-pink
-    (200,  90,  90),   # stopline          — soft blue
-    (90,  200,  90),   # roadblock         — light green
+    (50,  200,  50)    # crosswalk         — light green
 ]
 
 # Trigger distance per class (meters). When the closest detection is within
@@ -68,12 +58,7 @@ _DEFAULT_TRIGGER_DIST = {
     'no_entry':         0.80,
     'exit_highway':     0.60,
     'entrance_highway': 0.80,
-    'crosswalk':        0.50,
-    'pedestrian':       1.50,   # react early to people
-    'car':              1.50,   # react early to other vehicles
-    'trafficlight':     2.00,   # need to read the light from far away
-    'stopline':         0.40,   # only relevant when very close
-    'roadblock':        1.00,   # static obstacle, medium range
+    'crosswalk':        0.50
 }
 
 # Cooldown per class (seconds) — minimum time between two TRIGGER events
@@ -88,12 +73,7 @@ _DEFAULT_COOLDOWN = {
     'no_entry':         5.0,
     'exit_highway':     8.0,
     'entrance_highway': 8.0,
-    'crosswalk':        3.0,
-    'pedestrian':       1.0,    # update often while visible
-    'car':              1.0,    # update often while visible
-    'trafficlight':     2.0,    # state can change (red→green)
-    'stopline':         3.0,
-    'roadblock':        3.0,
+    'crosswalk':        3.0
 }
 
 # Supported ROS2 Image encodings → NumPy dtype + OpenCV conversion
